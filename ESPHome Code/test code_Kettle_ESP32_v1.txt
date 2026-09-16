@@ -1,0 +1,142 @@
+esphome:
+  name: smart-kettle
+  friendly_name: Smart Kettle
+  project:
+    name: smarter.kettle-hw-test
+    version: "0.1.4"
+
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: arduino
+
+logger:
+  level: INFO 
+
+api:
+  encryption:
+    key: "Mvn6V41ZuN7QzNjcKvwlvZeAjUZmvzYkxJu6a5Ijh+4="
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: Smart Kettle Fallback Hotspot
+    password: !secret Kettle_AP_Pass
+
+captive_portal:
+
+# ==========================================
+# OUTPUTS (RELAY, BUZZER, LED, SCALE POWER)
+# ==========================================
+output:
+  # Swapped to GPIO19: Buzzer PWM driver
+  - platform: ledc
+    pin: GPIO19
+    id: buzzer_pwm_out
+    frequency: 2700 Hz
+
+  - platform: gpio
+    pin:
+      number: GPIO21
+      inverted: true
+    id: button_led_out
+
+  # Swapped to GPIO16: Scale Enable Power
+  - platform: gpio
+    pin: GPIO16
+    id: scale_enable_pin
+
+rtttl:
+  output: buzzer_pwm_out
+  id: kettle_buzzer
+
+switch:
+  - platform: gpio
+    pin: GPIO22
+    name: "Relay (Heating Element)"
+    id: kettle_relay
+    restore_mode: ALWAYS_OFF
+
+  - platform: output
+    name: "Scale Power"
+    output: scale_enable_pin
+    id: scale_power
+    restore_mode: ALWAYS_ON
+
+# ==========================================
+# INPUTS (BUTTON & DUAL ADC SENSORS)
+# ==========================================
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO17
+      mode: INPUT
+      inverted: true
+    name: "Base Button"
+    id: kettle_button
+    on_press:
+      then:
+        - switch.turn_on: kettle_relay
+        - rtttl.play: "beep:d=16,o=5,b=120:c6"
+    on_release:
+      then:
+        - switch.turn_off: kettle_relay
+
+sensor:
+  # --- 1. Weight Sensor Pipeline ---
+  - platform: adc
+    pin: GPIO35
+    name: "Weight Raw Voltage"
+    id: weight_raw_voltage
+    update_interval: 250ms
+    attenuation: 11db   # CRITICAL: Allows reading up to 3.3V
+    filters:
+      - lambda: return max((float)0.0, x);
+
+  # --- 2. NTC Temperature Pipeline ---
+  - platform: adc
+    pin: GPIO33
+    id: ntc_raw_voltage
+    update_interval: 250ms
+    attenuation: 11db   # CRITICAL: Allows reading up to 3.3V
+
+  - platform: resistance
+    sensor: ntc_raw_voltage
+    configuration: DOWNSTREAM
+    resistor: 10kOhm
+    id: ntc_resistance
+
+  - platform: ntc
+    sensor: ntc_resistance
+    name: "Water Temperature"
+    id: kettle_temperature
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 50kOhm
+          
+# ==========================================
+# DIAGNOSTICS LOGGING
+# ==========================================
+interval:
+  - interval: 1s
+    then:
+      - light.toggle: button_led
+      - logger.log:
+          format: "[KETTLE] Temp: %.1f °C | Volume: %.2f L | Btn: %s | Heat: %s"
+          args:
+            - "id(kettle_temperature).state"
+            - "id(weight_raw_voltage).state"
+            - 'id(kettle_button).state ? "ON" : "OFF"'
+            - 'id(kettle_relay).state ? "ON" : "OFF"'
+          level: INFO
+
+light:
+  - platform: binary
+    name: "Button LED"
+    output: button_led_out
+    id: button_led

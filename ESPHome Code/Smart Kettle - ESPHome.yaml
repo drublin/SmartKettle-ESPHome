@@ -1,0 +1,407 @@
+esphome:
+  name: smart-kettle
+  friendly_name: Smart Kettle
+  project:
+    name: smarter.kettle-final
+    version: "2.4.0"
+
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+
+# ==========================================
+# CONFIGURATION TOGGLES (DEBUG MODE)
+# ==========================================
+substitutions:
+  # Set to "false" to see raw voltage diagnostics in HA.
+  # Set to "true" to hide them from the HA dashboard.
+  hide_debug_entities: "false"
+
+api:
+  encryption:
+    key: !secret smart_kettle__api_encription_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Kettle AP"
+    password: "kettleadmin"
+
+captive_portal:
+
+# ==========================================
+# GLOBAL VARIABLES (NVRAM & STATE TRACKING)
+# ==========================================
+globals:
+  - id: boil_count
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: manual_cancel
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+
+# ==========================================
+# HA CONFIGURATION & CONTROLS (FLASH STORED)
+# ==========================================
+number:
+  - platform: template
+    name: "Target Temperature"
+    id: target_temp_setting
+    optimistic: true
+    min_value: 40
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 100
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-chevron-up"
+
+  - platform: template
+    name: "Preset: Single Click"
+    id: preset_single
+    optimistic: true
+    min_value: 40
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 85
+    entity_category: config
+
+  - platform: template
+    name: "Preset: Double Click"
+    id: preset_double
+    optimistic: true
+    min_value: 40
+    max_value: 100
+    step: 1
+    restore_value: true
+    initial_value: 95
+    entity_category: config
+
+  - platform: template
+    name: "Calibration: Empty Voltage"
+    id: cal_empty_voltage
+    optimistic: true
+    min_value: 0.0
+    max_value: 3.3
+    step: 0.01
+    restore_value: true
+    initial_value: 0.30
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Calibration: Full Voltage"
+    id: cal_full_voltage
+    optimistic: true
+    min_value: 0.0
+    max_value: 3.3
+    step: 0.01
+    restore_value: true
+    initial_value: 1.60
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Calibration: Temperature Delta"
+    id: temp_delta
+    optimistic: true
+    min_value: -10.0
+    max_value: 10.0
+    step: 0.1
+    restore_value: true
+    initial_value: 0.0
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: template
+    name: "Kettle Status"
+    id: kettle_state
+    icon: "mdi:information"
+
+  - platform: template
+    name: "Water Temperature Display"
+    id: temp_display
+    icon: "mdi:thermometer"
+    update_interval: 1s
+    lambda: |-
+      if (!id(jug_present).state) {
+        return std::string("Jug Off");
+      }
+      float final_temp = id(kettle_temperature).state + id(temp_delta).state;
+      char buffer[16];
+      sprintf(buffer, "%.1f °C", final_temp);
+      return std::string(buffer);
+
+  - platform: template
+    name: "Water Level Display"
+    id: volume_display
+    icon: "mdi:water"
+    update_interval: 1s
+    lambda: |-
+      if (!id(jug_present).state) {
+        return std::string("Jug Off");
+      }
+      float vol = id(kettle_volume_raw).state;
+      char buffer[16];
+      sprintf(buffer, "%.2f L", vol);
+      return std::string(buffer);
+
+button:
+  - platform: factory_reset
+    id: factory_reset_btn
+    name: "Factory Reset"
+    internal: true
+
+# ==========================================
+# OUTPUTS & HARDWARE
+# ==========================================
+output:
+  - platform: ledc
+    pin: GPIO19
+    id: buzzer_pwm_out
+
+  - platform: gpio
+    pin:
+      number: GPIO21
+      inverted: true
+    id: button_led_out
+
+  - platform: gpio
+    pin: GPIO16
+    id: scale_enable_pin
+
+rtttl:
+  output: buzzer_pwm_out
+  id: kettle_buzzer
+
+light:
+  - platform: binary
+    name: "Button LED"
+    output: button_led_out
+    id: button_led
+    internal: true
+
+switch:
+  - platform: output
+    name: "Scale Power"
+    output: scale_enable_pin
+    id: scale_power
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    pin: GPIO22
+    name: "Kettle Power"
+    id: kettle_relay
+    icon: "mdi:kettle"
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - if:
+          condition:
+            lambda: 'return !id(jug_present).state;'
+          then:
+            - switch.turn_off: kettle_relay
+          else:
+            - globals.set:
+                id: manual_cancel
+                value: 'true'
+            - rtttl.play: "Coin:d=16,o=5,b=100:b5,e6"
+            - text_sensor.template.publish:
+                id: kettle_state
+                state: "Heating"
+            - light.turn_on: button_led
+    on_turn_off:
+      - light.turn_off: button_led
+      - if:
+          condition:
+            lambda: 'return id(manual_cancel) && id(jug_present).state;'
+          then:
+            - globals.set:
+                id: manual_cancel
+                value: 'false'
+            - text_sensor.template.publish:
+                id: kettle_state
+                state: "Standby"
+            - rtttl.play: "MarioPipe:d=16,o=6,b=250:g6,d6,a5,g5,d5,a4"
+interval:
+      - interval: 2s
+        then:
+          - switch.turn_on: scale_power
+          - delay: 500ms    # Wait for the INA to finish Vos calibration and output to stabilize
+          - component.update: weight_raw_voltage
+          - switch.turn_off: scale_power
+              
+# ==========================================
+# SCRIPTS
+# ==========================================
+script:
+  - id: finish_heating_cycle
+    then:
+      - globals.set:
+          id: manual_cancel
+          value: 'false'
+      - switch.turn_off: kettle_relay
+      - text_sensor.template.publish:
+          id: kettle_state
+          state: "Finished"
+      - lambda: |-
+          id(boil_count) += 1;
+          if (id(boil_count) % 3 == 0) {
+              const char* songs[] = {
+                "Mario:d=4,o=5,b=100:16e6,16e6,32p,8e6,16c6,8e6,8g6,8p,8g,8p,8c6,16p,8g,16p,8e,16p,8a,8b,16a#,8a,16g.,16e6,16g6,8a6,16f6,8g6,8e6,16c6,16d6,8b,16p",
+                "Tetris:d=4,o=5,b=160:e6,8b,8c6,8d6,16e6,16d6,8c6,8b,a,8a,8c6,e6,8d6,8c6,b,8b,8c6,d6,e6,c6,a,2a",
+                "HappyBday:d=4,o=5,b=125:8g.,16g.,a.,g.,c6.,2b,8g.,16g.,a.,g.,d6.,2c6,8g.,16g.,g6.,e6.,c6.,b.,a.,8f6.,16f6.,e6.,c6.,d6.,2c6",
+                "Pirates:d=4,o=5,b=160:8a,8c6,8d6,d6,8d6,8e6,8f6,f6,8f6,8g6,8e6,e6,8d6,8c6,8c6,d6",
+                "Imperial:d=4,o=5,b=100:e,e,e,8c,16g,e,8c,16g,e",
+                "LionSleeps:d=4,o=5,b=120:8f,8g,a,8g,8f,8g,a,8g,8f,8g,2a,8a,8g,8f,8g,2f"
+              };
+              int num_songs = sizeof(songs) / sizeof(songs[0]);
+              int index = random_uint32() % num_songs;
+              id(kettle_buzzer).play(songs[index]);
+          } else {
+              id(kettle_buzzer).play("double:d=16,o=5,b=120:c6,p,c6");
+          }
+
+# ==========================================
+# INPUTS & SENSORS
+# ==========================================
+binary_sensor:
+  - platform: template
+    name: "Jug Present"
+    id: jug_present
+    internal: true
+    lambda: 'return id(ntc_raw_voltage).state < 3.10;'
+    on_press:
+      - text_sensor.template.publish:
+          id: kettle_state
+          state: "Standby"
+    on_release:
+      - if:
+          condition:
+            switch.is_on: kettle_relay
+          then:
+            - switch.turn_off: kettle_relay
+      - text_sensor.template.publish:
+          id: kettle_state
+          state: "Jug Off"
+
+  - platform: gpio
+    pin:
+      number: GPIO17
+      mode: INPUT
+      inverted: true
+    name: "Base Button"
+    id: kettle_button
+    on_multi_click:
+      - timing:
+          - ON for at most 1s
+          - OFF for at most 0.4s
+          - ON for at most 1s
+          - OFF for at least 0.2s
+        then:
+          - if:
+              condition:
+                switch.is_on: kettle_relay
+              then:
+                - switch.turn_off: kettle_relay
+              else:
+                - number.set:
+                    id: target_temp_setting
+                    value: !lambda 'return id(preset_double).state;'
+                - switch.turn_on: kettle_relay
+
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.4s
+        then:
+          - if:
+              condition:
+                switch.is_on: kettle_relay
+              then:
+                - switch.turn_off: kettle_relay
+              else:
+                - number.set:
+                    id: target_temp_setting
+                    value: !lambda 'return id(preset_single).state;'
+                - switch.turn_on: kettle_relay
+          
+      - timing:
+          - ON for at least 10s
+        then:
+          - rtttl.play: "error:d=4,o=4,b=120:a,p,a,p,a,p,a"
+          - delay: 2s
+          - button.press: factory_reset_btn
+
+sensor:
+  # --- Weight Sensor ---
+  - platform: adc
+    pin: GPIO35
+    name: "Raw Weight Voltage"
+    id: weight_raw_voltage
+    update_interval: never
+    attenuation: 12db
+    internal: ${hide_debug_entities}
+    entity_category: diagnostic
+    filters:
+      - lambda: return max((float)0.0, x);
+
+  - platform: template
+    name: "Current Volume Raw"
+    id: kettle_volume_raw
+    unit_of_measurement: "L"
+    update_interval: 1s
+    internal: true
+    lambda: |-
+      float empty_v = id(cal_empty_voltage).state;
+      float full_v = id(cal_full_voltage).state;
+      float raw = id(weight_raw_voltage).state;
+      
+      if (raw <= empty_v) return 0.0;
+      float volume = ((raw - empty_v) / (full_v - empty_v)) * 1.5;
+      
+      if (volume > 2.0) return 2.0; 
+      return max((float)0.0, volume);
+
+  # --- Temperature Sensor ---
+  - platform: adc
+    pin: GPIO33
+    name: "Raw NTC Voltage"
+    id: ntc_raw_voltage
+    update_interval: 0.5s
+    attenuation: 12db
+    internal: ${hide_debug_entities}
+    entity_category: diagnostic
+
+  - platform: resistance
+    sensor: ntc_raw_voltage
+    configuration: DOWNSTREAM
+    resistor: 10kOhm
+    id: ntc_resistance
+    internal: true
+
+  - platform: ntc
+    sensor: ntc_resistance
+    id: kettle_temperature
+    internal: true
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 50kOhm
+    on_value:
+      - if:
+          condition:
+            and:
+              - switch.is_on: kettle_relay
+              - lambda: 'return id(jug_present).state;'
+              - lambda: 'return (x + id(temp_delta).state) >= id(target_temp_setting).state;'
+          then:
+            - script.execute: finish_heating_cycle
