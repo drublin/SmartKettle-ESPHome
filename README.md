@@ -73,6 +73,7 @@ The original kettle board is reused (except for scales circuit). Mount your ESP3
 | **NTC Sensor** | `TP7` | `GPIO34` | Analog temperature and jug presence reading. |
 | **HX711 DT** |  | `GPIO33` | HX711 Data. |
 | **HX711 SCK** |  | `GPIO18` | HX711 CLock. |
+| **3.3v** | `TP9` |  |  3.3v from 5-to-3.3v LDO |
 | ~~**Scale Power (EN/CAL)**~~ | ~~`TP12`~~ | ~~`GPIO16`~~ | ~~Triggers the INA amplifier calibration and powers the scale.~~|| ~~**Weight Sensor**~~ | ~~`TP11`~~ | ~~`GPIO35`~~ | ~~Analog output from the MCP6N11 INA.~~ |
 | ~~**Weight Sensor**~~ | ~~`TP11`~~ | ~~`GPIO35`~~ | ~~Analog output from the MCP6N11 INA.~~ |
 
@@ -96,7 +97,7 @@ HX711 communicates over 3.3v digital signals to ESP. It can go 5v, but ESP limit
 Use the below diagram and use the same resistors type/batch/size. Check how i [screwd it up](#f2-hx711-load-cell-resistors)
 
 
- ![HX711 and the Load Cell.](photos/HX711 Load Cell.jpg)
+ ![HX711 and the Load Cell.](photos/HX711%20Load%20Cell.jpg)
  ![](photos/HX711_1.jpg)
 
 
@@ -126,9 +127,9 @@ Once reassembled, you have a completely local, lightning-fast smart kettle seaml
 
 The beauty also lies in the full reuse on the existing PCB boards.
 
-![Final Result 1](photos/PXL_20260823_222621114.jpg)
-![Final Result 2](photos/PXL_20260826_144254008.jpg)
-![Final Result 3](photos/HX711_1.jpg)
+
+![Final Result 1](photos/PXL_20260925_072003592.jpg)
+![Final Result 2](photos/HX711_1.jpg)
 
 
 
@@ -163,8 +164,34 @@ mind that the values are negative.
 After you have the values, you can use calibration input fields on HA or just hardcode them in the code
 
 ```
-initial_value: -4448800
+  - platform: template
+    name: "Calibration: Empty Value"
+    id: cal_empty_value
+    optimistic: true
+    min_value: -10000000
+    max_value: 10000000
+    step: 1
+    restore_value: true
+    initial_value: -4448800
+    entity_category: diagnostic
+    set_action:
+      - lambda: 'id(cal_empty_value).publish_state(x);'
+
+  - platform: template
+    name: "Calibration: Full Value"
+    id: cal_full_value
+    optimistic: true
+    min_value: -10000000
+    max_value: 10000000
+    step: 1
+    restore_value: true
+    initial_value: -4688800
+    entity_category: diagnostic
+    set_action:
+      - lambda: 'id(cal_full_value).publish_state(x);'
 ```
 
 
+Happy tinkering,
+dru
 
