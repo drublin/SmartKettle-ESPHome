@@ -3,7 +3,20 @@ esphome:
   friendly_name: Smart Kettle
   project:
     name: smarter.kettle-final
-    version: "2.4.0"
+    version: "2.5.0"
+  on_boot:
+    priority: -100
+    then:
+      # Short happy beep when ESP is loaded and ready
+      - rtttl.play: "ready:d=16,o=5,b=160:c6,e6,g6"
+      - delay: 15s
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            # Triple long beep if WiFi is not connected after 15 seconds
+            - rtttl.play: "nowifi:d=2,o=5,b=100:c6,p,c6,p,c6"
 
 esp32:
   board: wemos_d1_mini32
@@ -17,13 +30,11 @@ logger:
 # CONFIGURATION TOGGLES (DEBUG MODE)
 # ==========================================
 substitutions:
-  # Set to "false" to see raw voltage diagnostics in HA.
-  # Set to "true" to hide them from the HA dashboard.
   hide_debug_entities: "false"
 
 api:
   encryption:
-    key: !secret smart_kettle__api_encription_key
+    key: "xxxxxxxxxxx"
 
 ota:
   - platform: esphome
@@ -88,27 +99,32 @@ number:
     initial_value: 95
     entity_category: config
 
+  # Adjusted for HX711 which outputs large integers instead of 0-3.3V
   - platform: template
-    name: "Calibration: Empty Voltage"
-    id: cal_empty_voltage
+    name: "Calibration: Empty Value"
+    id: cal_empty_value
     optimistic: true
-    min_value: 0.0
-    max_value: 3.3
-    step: 0.01
+    min_value: -10000000
+    max_value: 10000000
+    step: 1
     restore_value: true
-    initial_value: 0.30
+    initial_value: -4448800
     entity_category: diagnostic
+    set_action:
+      - lambda: 'id(cal_empty_value).publish_state(x);'
 
   - platform: template
-    name: "Calibration: Full Voltage"
-    id: cal_full_voltage
+    name: "Calibration: Full Value"
+    id: cal_full_value
     optimistic: true
-    min_value: 0.0
-    max_value: 3.3
-    step: 0.01
+    min_value: -10000000
+    max_value: 10000000
+    step: 1
     restore_value: true
-    initial_value: 1.60
+    initial_value: -4688800
     entity_category: diagnostic
+    set_action:
+      - lambda: 'id(cal_full_value).publish_state(x);'
 
   - platform: template
     name: "Calibration: Temperature Delta"
@@ -120,6 +136,8 @@ number:
     restore_value: true
     initial_value: 0.0
     entity_category: diagnostic
+    set_action:
+      - lambda: 'id(temp_delta).publish_state(x);'
 
 text_sensor:
   - platform: template
@@ -175,10 +193,6 @@ output:
       inverted: true
     id: button_led_out
 
-  - platform: gpio
-    pin: GPIO16
-    id: scale_enable_pin
-
 rtttl:
   output: buzzer_pwm_out
   id: kettle_buzzer
@@ -191,13 +205,6 @@ light:
     internal: true
 
 switch:
-  - platform: output
-    name: "Scale Power"
-    output: scale_enable_pin
-    id: scale_power
-    internal: true
-    restore_mode: ALWAYS_OFF
-
   - platform: gpio
     pin: GPIO22
     name: "Kettle Power"
@@ -232,14 +239,7 @@ switch:
                 id: kettle_state
                 state: "Standby"
             - rtttl.play: "MarioPipe:d=16,o=6,b=250:g6,d6,a5,g5,d5,a4"
-interval:
-      - interval: 2s
-        then:
-          - switch.turn_on: scale_power
-          - delay: 500ms    # Wait for the INA to finish Vos calibration and output to stabilize
-          - component.update: weight_raw_voltage
-          - switch.turn_off: scale_power
-              
+
 # ==========================================
 # SCRIPTS
 # ==========================================
@@ -342,17 +342,16 @@ binary_sensor:
           - button.press: factory_reset_btn
 
 sensor:
-  # --- Weight Sensor ---
-  - platform: adc
-    pin: GPIO35
-    name: "Raw Weight Voltage"
-    id: weight_raw_voltage
-    update_interval: never
-    attenuation: 12db
+  # --- Weight Sensor (HX711) ---
+  - platform: hx711
+    name: "Raw Weight Value"
+    id: hx711_raw_weight
+    dout_pin: GPIO33
+    clk_pin: GPIO18
+    gain: 128
+    update_interval: 1s
     internal: ${hide_debug_entities}
     entity_category: diagnostic
-    filters:
-      - lambda: return max((float)0.0, x);
 
   - platform: template
     name: "Current Volume Raw"
@@ -361,11 +360,12 @@ sensor:
     update_interval: 1s
     internal: true
     lambda: |-
-      float empty_v = id(cal_empty_voltage).state;
-      float full_v = id(cal_full_voltage).state;
-      float raw = id(weight_raw_voltage).state;
+      float empty_v = id(cal_empty_value).state;
+      float full_v = id(cal_full_value).state;
+      float raw = id(hx711_raw_weight).state;
       
-      if (raw <= empty_v) return 0.0;
+      if (full_v == empty_v) return 0.0;
+      
       float volume = ((raw - empty_v) / (full_v - empty_v)) * 1.5;
       
       if (volume > 2.0) return 2.0; 
@@ -373,7 +373,7 @@ sensor:
 
   # --- Temperature Sensor ---
   - platform: adc
-    pin: GPIO33
+    pin: GPIO34
     name: "Raw NTC Voltage"
     id: ntc_raw_voltage
     update_interval: 0.5s
